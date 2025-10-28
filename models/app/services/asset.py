@@ -34,14 +34,18 @@ def calculate_dynamic_depreciation(payload: DDARequest) -> DDAResponse:
     market_series: List[float]
     if payload.market_price_series:
         market_series = list(payload.market_price_series)
+        if len(market_series) < years:
+            raise ValueError("market_price_series must contain at least useful_life_years entries.")
         if len(market_series) == years:
-            market_series.insert(0, payload.acquisition_cost)
+            market_series.append(market_series[-1])
     else:
-        market_series = [payload.acquisition_cost]
+        market_series = [payload.acquisition_cost] * (years + 1)
 
     schedule: List[DDAScheduleEntry] = []
     remaining_value = payload.acquisition_cost
     cumulative_depreciation = 0.0
+    total_revaluation_gain_loss = 0.0
+    total_unrecognised_revaluation = 0.0
 
     depreciable_total = max(payload.acquisition_cost - payload.salvage_value, 0.0)
     effective_total_days = sum(
@@ -62,16 +66,12 @@ def calculate_dynamic_depreciation(payload: DDARequest) -> DDAResponse:
         )
 
         annual_base = daily_depreciation * max(actual_days, 0)
+        usage_factor = 1 + usage_ratio
 
-        if len(market_series) > year:
-            prev_price = market_series[year - 1]
-            curr_price = market_series[year]
-        elif len(market_series) == 1:
-            prev_price = market_series[0]
-            curr_price = prev_price
-        else:
-            prev_price = market_series[-1]
-            curr_price = prev_price
+        prev_index = min(year - 1, len(market_series) - 1)
+        curr_index = min(year, len(market_series) - 1)
+        prev_price = market_series[prev_index]
+        curr_price = market_series[curr_index]
 
         if prev_price > 0 and curr_price > 0:
             r = math.log(curr_price / prev_price)
@@ -79,15 +79,35 @@ def calculate_dynamic_depreciation(payload: DDARequest) -> DDAResponse:
             r = 0.0
 
         market_sensitivity = math.exp(r * payload.usage_elasticity) * payload.beta
-        usage_adjustment = 1 + usage_ratio
-        dynamic_multiplier = usage_adjustment * market_sensitivity * payload.adjustment_factor
+        depreciation_raw = annual_base * usage_factor * payload.adjustment_factor
+        depreciation_cap = max(remaining_value - payload.salvage_value, 0.0)
+        depreciation_expense = min(max(depreciation_raw, 0.0), depreciation_cap)
+        post_depreciation_value = remaining_value - depreciation_expense
 
-        adjusted_expense = annual_base * dynamic_multiplier
-        adjusted_expense = max(adjusted_expense, 0.0)
-        depreciation_cap = remaining_value - payload.salvage_value
-        depreciation_expense = min(adjusted_expense, depreciation_cap)
+        baseline_revaluation_value = post_depreciation_value * market_sensitivity
+        baseline_gain_loss = baseline_revaluation_value - post_depreciation_value
 
-        closing_book_value = remaining_value - depreciation_expense
+        projected_cumulative = cumulative_depreciation + depreciation_expense
+        trigger_stage: Optional[str] = None
+        unrecognised_revaluation = 0.0
+
+        if baseline_gain_loss < 0:
+            baseline_loss = -baseline_gain_loss
+            allowed_loss = max(0.0, 1.2 * payload.acquisition_cost - projected_cumulative)
+            recognised_loss_abs = min(baseline_loss, allowed_loss)
+            recognised_loss = -recognised_loss_abs
+            if recognised_loss_abs < baseline_loss:
+                trigger_stage = "6-3-1"
+            final_revaluation_value = post_depreciation_value + recognised_loss
+            final_revaluation_value = max(final_revaluation_value, payload.salvage_value)
+            revaluation_gain_loss = recognised_loss
+            unrecognised_revaluation = baseline_loss - recognised_loss_abs
+        else:
+            final_revaluation_value = baseline_revaluation_value
+            revaluation_gain_loss = baseline_gain_loss
+            unrecognised_revaluation = 0.0
+
+        closing_book_value = final_revaluation_value
         adjustment_multiplier = (
             depreciation_expense / annual_base if annual_base else 0.0
         )
@@ -98,6 +118,11 @@ def calculate_dynamic_depreciation(payload: DDARequest) -> DDAResponse:
                 opening_book_value=round(remaining_value, 2),
                 depreciation_expense=round(depreciation_expense, 2),
                 closing_book_value=round(closing_book_value, 2),
+                baseline_revaluation_value=round(baseline_revaluation_value, 2),
+                final_revaluation_value=round(final_revaluation_value, 2),
+                revaluation_gain_loss=round(revaluation_gain_loss, 2),
+                trigger_stage=trigger_stage,
+                unrecognised_revaluation=round(unrecognised_revaluation, 2),
                 adjustment_multiplier=round(adjustment_multiplier, 4),
                 usage_ratio=round(usage_ratio, 4),
                 market_sensitivity=round(market_sensitivity, 4),
@@ -105,12 +130,16 @@ def calculate_dynamic_depreciation(payload: DDARequest) -> DDAResponse:
         )
 
         remaining_value = closing_book_value
-        cumulative_depreciation += depreciation_expense
+        cumulative_depreciation = projected_cumulative
+        total_revaluation_gain_loss += revaluation_gain_loss
+        total_unrecognised_revaluation += unrecognised_revaluation
 
     return DDAResponse(
         asset_label=payload.asset_label,
         schedule=schedule,
         total_depreciation=round(cumulative_depreciation, 2),
+        total_revaluation_gain_loss=round(total_revaluation_gain_loss, 2),
+        total_unrecognised_revaluation=round(total_unrecognised_revaluation, 2),
     )
 
 
@@ -152,8 +181,14 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
     accumulated_depreciation = payload.accumulated_depreciation_opening
     total_interest_expense = 0.0
     total_gain_loss = 0.0
+    total_termination_adjustment = 0.0
 
     interest_expense = payload.initial_asset_value * payload.discount_rate
+
+    total_planned_days = sum(planned_days) if planned_days else payload.lease_term_years * 365
+    total_unused_days = sum(unused_days) if unused_days else 0
+    effective_total_days = max(total_planned_days - total_unused_days, 1)
+    base_daily_amortization = payload.initial_asset_value / effective_total_days
 
     for period in range(1, periods + 1):
         plan_days = planned_days[period - 1]
@@ -161,7 +196,7 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
         unused = unused_days[period - 1]
         effective_days = max(plan_days - unused, 1)
 
-        daily_lease_amortization = opening_balance / effective_days
+        daily_lease_amortization = base_daily_amortization
 
         if standard_hours:
             standard_usage = standard_hours[period - 1]
@@ -179,7 +214,10 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
         )
 
         depreciation_component = daily_lease_amortization * actual_used_days * (1 + usage_ratio)
-        base_after_depreciation = opening_balance - depreciation_component
+        current_depreciation = max(depreciation_component, 0.0)
+        projected_accumulated = accumulated_depreciation + current_depreciation
+
+        base_after_depreciation = max(opening_balance - depreciation_component, payload.residual_value)
 
         if len(fair_values) > period:
             prev_fair_value = fair_values[period - 1]
@@ -203,18 +241,26 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
         trigger_stage = None
         post_trigger_value = baseline_revaluation_value
 
-        revaluation_gain_loss = baseline_revaluation_value - opening_balance
-        loss_component = max(0.0, -revaluation_gain_loss)
+        baseline_gain_loss = baseline_revaluation_value - opening_balance
+        baseline_loss_magnitude = max(0.0, -baseline_gain_loss)
+        termination_adjustment = 0.0
 
-        if accumulated_depreciation + loss_component > 1.2 * payload.initial_asset_value:
-            pv = current_fair_value if current_fair_value > 0 else baseline_revaluation_value
-            post_trigger_value = revaluation_gain_loss + pv
+        total_loss_projection = projected_accumulated + baseline_loss_magnitude
+
+        if total_loss_projection >= 1.2 * payload.initial_asset_value:
+            capacity = max(
+                0.0, 1.2 * payload.initial_asset_value - projected_accumulated
+            )
+            recognised_loss = -min(baseline_loss_magnitude, capacity)
+            post_trigger_value = opening_balance + recognised_loss
             trigger_stage = "6-3-1"
+            revaluation_gain_loss = recognised_loss
+            termination_adjustment = baseline_gain_loss - recognised_loss
         else:
             usage_condition = (
                 actual_used_days / max(payload.lease_term_years * 365, 1) >= 0.75
             )
-            revaluation_condition = abs(revaluation_gain_loss) > 2 * payload.initial_asset_value
+            revaluation_condition = abs(baseline_gain_loss) > 2 * payload.initial_asset_value
 
             if usage_condition and revaluation_condition:
                 reverse_impairment = (baseline_revaluation_value - payload.residual_value) * (1 - 0.3)
@@ -231,19 +277,23 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
 
                 post_trigger_value = current_value
 
-        revaluation_gain_loss = post_trigger_value - opening_balance
-        loss_component = max(0.0, -revaluation_gain_loss)
+            revaluation_gain_loss = post_trigger_value - opening_balance
+            loss_component = max(0.0, -revaluation_gain_loss)
 
-        if accumulated_depreciation + loss_component > payload.initial_asset_value:
-            post_trigger_value = opening_balance
-            revaluation_gain_loss = 0.0
-            trigger_stage = trigger_stage or "cap"
+            if projected_accumulated + loss_component > payload.initial_asset_value:
+                termination_adjustment = baseline_gain_loss - revaluation_gain_loss
+                post_trigger_value = opening_balance
+                revaluation_gain_loss = 0.0
+                trigger_stage = trigger_stage or "cap"
+            else:
+                termination_adjustment = baseline_gain_loss - revaluation_gain_loss
 
-        accumulated_depreciation += max(depreciation_component, 0.0)
+        accumulated_depreciation = projected_accumulated
         closing_balance = post_trigger_value
 
         total_interest_expense += interest_expense
         total_gain_loss += revaluation_gain_loss
+        total_termination_adjustment += termination_adjustment
 
         schedule.append(
             LAMScheduleEntry(
@@ -259,6 +309,7 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
                 trigger_stage=trigger_stage,
                 post_trigger_value=round(post_trigger_value, 2),
                 revaluation_gain_loss=round(revaluation_gain_loss, 2),
+                termination_adjustment=round(termination_adjustment, 2),
             )
         )
 
@@ -269,6 +320,7 @@ def calculate_lease_amortization(payload: LAMRequest) -> LAMResponse:
         schedule=schedule,
         total_revaluation_gain_loss=round(total_gain_loss, 2),
         total_interest_expense=round(total_interest_expense, 2),
+        total_termination_adjustment=round(total_termination_adjustment, 2),
     )
 
 

@@ -43,6 +43,7 @@ class CEEMResponse(BaseModel):
     standard_usage_value_quantitative: Optional[float]
     selected_standard_usage_value: float
     total_consumable_usage_value: float
+    adjusted_consumable_usage_value: float
     usage_change_rate: float
     market_change_index: float
     market_sensitivity_value: float

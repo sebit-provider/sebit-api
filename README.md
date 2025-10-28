@@ -59,6 +59,16 @@ uvicorn app.main:app --reload
 
 Interactive API docs become available at `http://localhost:8000/docs`.
 
+## Sample requests
+
+Use the bundled helper to exercise every endpoint with representative payloads:
+
+```bash
+python -m models.examples.sample_requests
+```
+
+Set `SEBIT_API_BASE_URL` to point at your Render deployment if you want to call the hosted service instead of a local server.
+
 ## Next steps
 
 - Extend remaining SEBIT model families using the same service/route structure.

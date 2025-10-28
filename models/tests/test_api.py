@@ -34,6 +34,13 @@ def test_asset_dda_endpoint():
     assert data["asset_label"] == "asset-1"
     assert len(data["schedule"]) > 0
     assert data["total_depreciation"] > 0
+    entry = data["schedule"][0]
+    assert "baseline_revaluation_value" in entry
+    assert "final_revaluation_value" in entry
+    assert "revaluation_gain_loss" in entry
+    assert "unrecognised_revaluation" in entry
+    assert "total_revaluation_gain_loss" in data
+    assert "total_unrecognised_revaluation" in data
 
 
 def test_asset_lam_endpoint():
@@ -58,6 +65,8 @@ def test_asset_lam_endpoint():
     assert data["lease_label"] == "lease-1"
     assert len(data["schedule"]) == 2
     assert data["total_revaluation_gain_loss"] != 0
+    assert "termination_adjustment" in data["schedule"][0]
+    assert "total_termination_adjustment" in data
 
 
 def test_asset_rvm_endpoint():
@@ -95,6 +104,7 @@ def test_expense_ceem_endpoint():
     assert response.status_code == 200
     data = response.json()
     assert data["expense_label"] == "ceem-1"
+    assert data["adjusted_consumable_usage_value"] is not None
     assert data["final_revaluation_value"] > 0
 
 

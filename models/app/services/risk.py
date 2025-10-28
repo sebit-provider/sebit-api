@@ -163,11 +163,7 @@ def calculate_farex(payload: FAREXRequest) -> FAREXResponse:
     """
     Foreign Adjustment & Real Exchange Model (FAREX) approximation.
 
-    Implements the SEBIT-FAREX workflow:
-      1) Compute last year's trade ratio between exports/imports.
-      2) Adjust the ratio with current year trade performance.
-      3) Derive the export/import sensitivity beta.
-      4) Build the final adjustment indicator and adjusted exchange rates.
+    Implements the SEBIT-FAREX workflow following the specification.
     """
     numerator_last_year = (
         (payload.last_year_prev_month_export - payload.last_year_prev_month_import) / payload.last_year_prev_month_export
@@ -191,43 +187,49 @@ def calculate_farex(payload: FAREXRequest) -> FAREXResponse:
     current_year_trade_ratio = last_year_trade_ratio - adjustment_term
 
     def _normalise_ratio(value: float) -> float:
-        if value > 0:
+        if value >= 0:
             return value
-        adjusted = 1 - abs(value)
-        if adjusted <= 0:
+        adjusted = value
+        while adjusted < 0:
             adjusted += 1
-        if adjusted <= 0:
-            adjusted = 0.001
+        adjusted = 1 - abs(adjusted)
+        if adjusted == 0:
+            adjusted = 1e-6
         return adjusted
 
     norm_last_year = _normalise_ratio(last_year_trade_ratio)
     norm_current_year = _normalise_ratio(current_year_trade_ratio)
-    export_import_beta = math.log(norm_last_year / norm_current_year) if norm_current_year != 0 else 0.0
+    export_import_beta = math.log(norm_last_year / norm_current_year) if norm_current_year not in {0.0, None} else 0.0
 
-    last_year_total_trade = (
+    ratio_component_numerator = (
         payload.last_year_prev_month_export
-        + payload.last_year_prev_month_import
         + payload.last_year_current_month_export
+        - payload.current_year_prev_month_export
+    )
+    ratio_component_denominator = (
+        payload.last_year_prev_month_import
         + payload.last_year_current_month_import
-    )
-    last_year_total_imports = payload.last_year_prev_month_import + payload.last_year_current_month_import
-    denominator_indicator = (last_year_total_imports - payload.last_year_prev_month_import) or payload.last_year_current_month_import
-    if denominator_indicator == 0:
-        denominator_indicator = 0.001
-
-    adjustment_indicator = 1 + export_import_beta * (
-        (last_year_total_trade - payload.current_year_prev_month_export) / denominator_indicator
-    )
-
-    inflation_adjustment = (1 + payload.inflation_rate_foreign) / (1 + payload.inflation_rate_home)
-    inflation_adjusted_rate = payload.spot_rate * inflation_adjustment
-
-    if abs(adjustment_indicator) >= 1.5:
-        final_adjusted_rate = payload.spot_rate / adjustment_indicator if adjustment_indicator != 0 else payload.spot_rate
+        - payload.last_year_prev_month_import
+    ) or payload.last_year_current_month_import
+    if ratio_component_denominator == 0:
+        ratio_component_denominator = 1e-6
+    ratio_component = ratio_component_numerator / ratio_component_denominator
+    if export_import_beta >= 0:
+        indicator_term = export_import_beta * ratio_component
+        adjustment_indicator = 1 - indicator_term
     else:
-        final_adjusted_rate = payload.spot_rate * adjustment_indicator
+        beta_abs = abs(export_import_beta)
+        indicator_term = beta_abs * ratio_component
+        adjustment_indicator = 1 + indicator_term
 
-    revaluation_amount = payload.base_currency_amount * payload.hedge_ratio * (final_adjusted_rate - payload.spot_rate)
+    inflation_adjusted_rate = payload.spot_rate * ((1 + payload.inflation_rate_home) / (1 + payload.inflation_rate_foreign))
+
+    if abs(adjustment_indicator) >= 1.5 and adjustment_indicator != 0:
+        final_adjusted_rate = inflation_adjusted_rate / adjustment_indicator
+    else:
+        final_adjusted_rate = inflation_adjusted_rate * adjustment_indicator
+
+    revaluation_amount = payload.base_currency_amount * (final_adjusted_rate - payload.spot_rate)
 
     return FAREXResponse(
         contract_id=payload.contract_id,

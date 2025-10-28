@@ -77,6 +77,26 @@ class DDAScheduleEntry(BaseModel):
     opening_book_value: float
     depreciation_expense: float
     closing_book_value: float
+    baseline_revaluation_value: float = Field(
+        ...,
+        description="Revaluation amount before trigger adjustments (Step 6).",
+    )
+    final_revaluation_value: float = Field(
+        ...,
+        description="Carrying amount after applying trigger logic.",
+    )
+    revaluation_gain_loss: float = Field(
+        ...,
+        description="Recognised revaluation gain/loss for the period.",
+    )
+    trigger_stage: Optional[str] = Field(
+        default=None,
+        description="Applied trigger identifier (6-1/6-2/6-3/6-3-1) if any.",
+    )
+    unrecognised_revaluation: float = Field(
+        ...,
+        description="Portion of revaluation gain/loss not recognised under trigger limits.",
+    )
     adjustment_multiplier: float = Field(
         ...,
         description="Effective multiplier applied to the baseline depreciation for the year.",
@@ -95,6 +115,8 @@ class DDAResponse(BaseModel):
     asset_label: Optional[str]
     schedule: List[DDAScheduleEntry]
     total_depreciation: float
+    total_revaluation_gain_loss: float
+    total_unrecognised_revaluation: float
 
 
 class LAMRequest(BaseModel):
@@ -211,6 +233,13 @@ class LAMScheduleEntry(BaseModel):
         ...,
         description="Post-trigger value minus opening balance.",
     )
+    termination_adjustment: float = Field(
+        ...,
+        description=(
+            "Amount deferred to lease termination settlement when revaluation cannot "
+            "be recognised under the model's IFRS limits."
+        ),
+    )
 
 
 class LAMResponse(BaseModel):
@@ -218,6 +247,7 @@ class LAMResponse(BaseModel):
     schedule: List[LAMScheduleEntry]
     total_revaluation_gain_loss: float
     total_interest_expense: float
+    total_termination_adjustment: float
 
 
 class RVMRequest(BaseModel):

@@ -50,7 +50,8 @@ def calculate_ceem(payload: CEEMRequest) -> CEEMResponse:
     effective_years = payload.useful_life_years + max(payload.elapsed_years - 1, 0)
     market_sensitivity_value = math.exp(market_change_index * effective_years) * payload.beta
 
-    final_revaluation_value = total_usage_value * (1 + usage_change_rate) * market_sensitivity_value
+    adjusted_usage_value = total_usage_value * (1 - usage_change_rate)
+    final_revaluation_value = adjusted_usage_value * market_sensitivity_value
 
     return CEEMResponse(
         expense_label=payload.expense_label,
@@ -59,6 +60,7 @@ def calculate_ceem(payload: CEEMRequest) -> CEEMResponse:
         standard_usage_value_quantitative=round(standard_value_quant, 2) if standard_value_quant is not None else None,
         selected_standard_usage_value=round(selected_standard_value, 2),
         total_consumable_usage_value=round(total_usage_value, 2),
+        adjusted_consumable_usage_value=round(adjusted_usage_value, 2),
         usage_change_rate=round(usage_change_rate, 6),
         market_change_index=round(market_change_index, 6),
         market_sensitivity_value=round(market_sensitivity_value, 6),
